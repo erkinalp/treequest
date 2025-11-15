@@ -14,6 +14,7 @@ A flexible answer tree search library featuring **AB-MCTS**, useful for (but not
 ## Quick Start
 ```python
 import random
+from pathlib import Path
 
 import treequest as tq
 
@@ -42,6 +43,10 @@ for _ in range(10):
 # 4. Extract the best score and state.
 best_state, best_node_score = tq.top_k(search_tree, algo, k=1)[0]
 print(f"Best state: {best_state}, Score: {best_node_score}")
+
+# 5. Visualize the search tree.
+output_file_basename = Path("ab_mcts_a_search_tree")
+tq.render(search_tree, output_file_basename, format="html")  # Generates `ab_mcts_a_search_tree.html`
 ```
 
 Alternatively, you can use an ask–tell interface with batched AB-MCTS sampling steps:
@@ -88,16 +93,21 @@ We recommend `batch_size<=5` as a starting point.
 - Checkpointing and resuming searches.
 
 ## Installation
-### uv
 First, install [`uv`](https://github.com/astral-sh/uv?tab=readme-ov-file#installation). Then you can install TreeQuest with the following command:
 ```bash
-uv add "treequest[abmcts-m]"
+uv add "treequest"
 ```
 
-### pip
 Alternatively, you can use pip to install TreeQuest:
 ```bash
-pip install "treequest[abmcts-m]"
+pip install "treequest"
+```
+
+There are optional dependencies for ABMCTS-M and visualization features. You can install them with:
+```bash
+uv add "treequest[abmcts-m]"  # For ABMCTS-M
+uv add "treequest[vis]"  # For visualization features
+uv add "treequest[all]"  # For all optional features
 ```
 
 ## Usage
@@ -121,7 +131,7 @@ def generate(parent_state: State | None) -> tuple[State, float]:
         state = refine_answer(parent_state.llm_answer, parent_state.score)
 
     return state, state.score
-    
+
 def initial_generation() -> State:
     """
     Call LLM API to generate an initial answer.
@@ -218,7 +228,58 @@ for _ in range(30):
     search_tree = ab_mcts_m.step(search_tree, generate_fns)
 ```
 
-**NOTE**: To run AB-MCTS-M, you need to install extra dependencies with the `treequest[abmcts-m]` option.
+**NOTE**: To run AB-MCTS-M, you need to install extra dependencies with the `treequest[abmcts-m]` or `treequest[all]` option.
+
+## Visualization
+TreeQuest provides visualization utilities to render the search tree. You can visualize the search tree using the `tq.render` function as shown in the Quick Start section.
+You need to install optional dependencies for visualization either by `uv add treequest[vis]` or `uv add treequest[all]`.
+
+```python
+import base64
+from io import BytesIO
+from pathlib import Path
+
+import treequest as tq
+from PIL import Image
+
+class State:
+    text: str
+    image: Image.Image
+
+def state_formatter_html(state: State) -> str:
+    """Formats the state for HTML visualization."""
+    buffer = BytesIO()
+    state.image.save(buffer, format="WEBP")
+    img_str = base64.b64encode(buffer.getvalue()).decode()
+    # HTML representation is allowed (ensure safety when using untrusted content)
+    return f'<p>{state.text}</p><br/><img src="data:image/webp;base64,{img_str}" width=100% />'
+
+generate_fns = {
+    "action_1": ...  # Define your node generation functions (actions) here
+}
+
+algo = tq.ABMCTSA()
+search_tree = algo.init_tree()
+output_dir = Path("progress"); output_dir.mkdir(exist_ok=True)
+for step in range(1, 11):
+    search_tree = algo.step(search_tree, generate_fns)
+    # We can check the progress by rendering the tree at each step.
+    if step % 5 > 0: continue
+    tq.render(
+        search_tree,
+        output_basename=output_dir / f"search_tree_step{step}",
+        format="pdf",  # For "pdf", "svg", "png", "jpg" and "jpeg" formats, using graphviz
+        state_formatter=lambda state: state.text,  # For non-HTML formats, use text only
+    )  # Generates `progress/search_tree_step5.pdf`, `progress/search_tree_step10.pdf`
+tq.render(
+    search_tree,
+    output_basename="search_tree",
+    format="html",  # For HTML format, use HTML with d3.js visualization
+    state_formatter=state_formatter_html,  # Use HTML formatter
+)  # Generates `search_tree.html`
+```
+
+> **IMPORTANT:** When using HTML format, ensure that the HTML file is securely handled, especially if the state formatter includes raw HTML content. Avoid opening untrusted HTML files in your browser. For example, XSS (cross site scripting) attacks can occur if the state includes malicious HTML/JavaScript code.
 
 ## Requirements
 
@@ -230,14 +291,24 @@ Contributions are welcome! Please see [CONTRIBUTING.md](./CONTRIBUTING.md) for d
 
 ## Citation
 ```bibtex
-@article{inoue2025wider,
-  title={Wider or Deeper? Scaling LLM Inference-Time Compute with Adaptive Branching Tree Search},
-  author={Inoue, Yuichi and Misaki, Kou and Imajuku, Yuki and Kuroki, So and Nakamura, Taishi and Akiba, Takuya},
-  journal={arXiv preprint arXiv:2503.04412},
-  year={2025}
+@inproceedings{inoue2025wider,
+  title={Wider or Deeper?  Scaling {LLM} Inference-Time Compute with Adaptive Branching Tree Search},
+  author={Yuichi Inoue and Kou Misaki and Yuki Imajuku and So Kuroki and Taishi Nakamura and Takuya Akiba},
+  booktitle={The Thirty-ninth Annual Conference on Neural Information Processing Systems},
+  year={2025},
+  url={https://openreview.net/forum?id=jAsr5GHt3P}
 }
 ```
 
 ## License
 
 [Apache 2.0](./LICENSE)
+
+### Third-party notices
+
+TreeQuest bundles a few assets whose original authors retain copyright:
+
+- **D3.js v7** by Mike Bostock and contributors, distributed under the ISC License. The full license text is included in `src/treequest/vis/assets/d3.LICENSE.txt` alongside the `d3.v7.min.js` binary.
+- **Colormap samples** extracted from matplotlib and seaborn. The data and license references are embedded in `src/treequest/vis/assets/colormaps.json`.
+
+These notices must be preserved in any redistribution of TreeQuest, including any compiled artifacts.
