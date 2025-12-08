@@ -4,14 +4,14 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Union
 
 from treequest.vis.errors import DependencyNotFoundError, RenderError
-from treequest.vis.snapshot import VisualizationSnapshot
-from treequest.vis.renderers.json_yaml import snapshot_to_dict
 from treequest.vis.renderers.color_utils import (
     ROOT_COLOR,
     ColorMap,
     apply_status_color,
     resolve_colormap,
 )
+from treequest.vis.renderers.json_yaml import snapshot_to_dict
+from treequest.vis.snapshot import VisualizationSnapshot
 
 
 def _get_d3_js() -> str:
