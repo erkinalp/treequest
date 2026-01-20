@@ -1,5 +1,7 @@
 """TreeQuest MCP Server implementation."""
 
+import ast
+import asyncio
 import anyio
 import click
 import json
@@ -10,6 +12,41 @@ from mcp.server.lowlevel import Server
 
 import treequest as tq
 from treequest.types import StateScoreType, GenerateFnType
+
+
+DANGEROUS_MODULES = frozenset({'os', 'sys', 'subprocess', 'shutil', 'socket', 'ctypes', 'multiprocessing'})
+DANGEROUS_BUILTINS = frozenset({'eval', 'exec', 'compile', 'open', '__import__', 'globals', 'locals', 'vars', 'getattr', 'setattr', 'delattr'})
+
+
+def _check_code_safety(code: str, action_name: str) -> Optional[str]:
+    """Check code safety using AST analysis."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        return f"Syntax error in code for action '{action_name}': {e}"
+    
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                module_name = alias.name.split('.')[0]
+                if module_name in DANGEROUS_MODULES:
+                    return f"Generate function for action '{action_name}' imports dangerous module: {module_name}"
+        
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                module_name = node.module.split('.')[0]
+                if module_name in DANGEROUS_MODULES:
+                    return f"Generate function for action '{action_name}' imports from dangerous module: {module_name}"
+        
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                if node.func.id in DANGEROUS_BUILTINS:
+                    return f"Generate function for action '{action_name}' uses dangerous builtin: {node.func.id}"
+            elif isinstance(node.func, ast.Attribute):
+                if node.func.attr in DANGEROUS_BUILTINS:
+                    return f"Generate function for action '{action_name}' uses dangerous function: {node.func.attr}"
+    
+    return None
 
 
 class TreeQuestSession:
@@ -26,11 +63,18 @@ class TreeQuestSession:
     def _create_algorithm(self):
         """Create the algorithm instance based on name and parameters."""
         if self.algorithm_name == "StandardMCTS":
-            return tq.StandardMCTS(**self.algorithm_params)
+            valid_params = {"samples_per_action", "exploration_weight"}
+            filtered_params = {k: v for k, v in self.algorithm_params.items() if k in valid_params}
+            return tq.StandardMCTS(**filtered_params)
         elif self.algorithm_name == "ABMCTSA":
-            return tq.ABMCTSA(**self.algorithm_params)
+            valid_params = {"dist_type", "reward_average_priors", "prior_config", "model_selection_strategy"}
+            filtered_params = {k: v for k, v in self.algorithm_params.items() if k in valid_params}
+            return tq.ABMCTSA(**filtered_params)
         elif self.algorithm_name == "ABMCTSM":
-            return tq.ABMCTSM(**self.algorithm_params)
+            valid_params = {"enable_pruning", "reward_average_priors", "model_selection_strategy",
+                           "min_subtree_size_for_pruning", "same_score_proportion_threshold"}
+            filtered_params = {k: v for k, v in self.algorithm_params.items() if k in valid_params}
+            return tq.ABMCTSM(**filtered_params)
         else:
             raise ValueError(f"Unknown algorithm: {self.algorithm_name}")
     
@@ -45,6 +89,7 @@ class TreeQuestSession:
 
 
 sessions: Dict[str, TreeQuestSession] = {}
+sessions_lock = asyncio.Lock()
 
 
 def _validate_session_exists(session_id: str) -> Optional[str]:
@@ -108,10 +153,9 @@ def _validate_generate_functions(generate_functions: Dict[str, str]) -> Optional
         if len(code) > 10000:
             return f"Generate function code for action '{action_name}' is too long ({len(code)} chars). Maximum allowed is 10000 characters."
         
-        dangerous_imports = ['os', 'sys', 'subprocess', 'eval', 'exec', 'open', '__import__']
-        for dangerous in dangerous_imports:
-            if dangerous in code:
-                return f"Generate function code for action '{action_name}' contains potentially dangerous operation: {dangerous}"
+        safety_error = _check_code_safety(code, action_name)
+        if safety_error:
+            return safety_error
     
     return None
 
@@ -315,7 +359,8 @@ def main(port: int, transport: str) -> int:
         
         try:
             session = TreeQuestSession(algorithm_name, params)
-            sessions[session.session_id] = session
+            async with sessions_lock:
+                sessions[session.session_id] = session
             
             result = {
                 "session_id": session.session_id,
@@ -432,10 +477,11 @@ def main(port: int, transport: str) -> int:
         """Get current tree state and statistics."""
         session_id = arguments["session_id"]
         
-        if session_id not in sessions:
+        session_error = _validate_session_exists(session_id)
+        if session_error:
             return [types.TextContent(
                 type="text",
-                text=f"Error: Session {session_id} not found"
+                text=session_error
             )]
         
         session = sessions[session_id]
@@ -505,7 +551,7 @@ def main(port: int, transport: str) -> int:
                     text="Warning: Tree has no non-root nodes to rank. Perform tree steps first."
                 )]
             
-            top_results = tq.top_k(session.state.tree, session.algorithm, k=k)
+            top_results = tq.top_k(session.state, session.algorithm, k=k)
             
             serializable_results = []
             for state, score in top_results:
@@ -534,19 +580,20 @@ def main(port: int, transport: str) -> int:
 
     async def list_sessions_tool(arguments: dict) -> list[types.ContentBlock]:
         """List all active sessions."""
-        session_list = []
-        for session_id, session in sessions.items():
-            session_list.append({
-                "session_id": session_id,
-                "algorithm": session.algorithm_name,
-                "step_count": session.step_count,
-                "tree_size": len(session.state.tree)
-            })
-        
-        result = {
-            "active_sessions": len(sessions),
-            "sessions": session_list
-        }
+        async with sessions_lock:
+            session_list = []
+            for session_id, session in sessions.items():
+                session_list.append({
+                    "session_id": session_id,
+                    "algorithm": session.algorithm_name,
+                    "step_count": session.step_count,
+                    "tree_size": len(session.state.tree)
+                })
+            
+            result = {
+                "active_sessions": len(sessions),
+                "sessions": session_list
+            }
         
         return [types.TextContent(
             type="text",
@@ -557,13 +604,14 @@ def main(port: int, transport: str) -> int:
         """Delete a session."""
         session_id = arguments["session_id"]
         
-        if session_id not in sessions:
-            return [types.TextContent(
-                type="text",
-                text=f"Error: Session {session_id} not found"
-            )]
-        
-        del sessions[session_id]
+        async with sessions_lock:
+            if session_id not in sessions:
+                return [types.TextContent(
+                    type="text",
+                    text=f"Error: Session {session_id} not found"
+                )]
+            
+            del sessions[session_id]
         
         result = {
             "session_id": session_id,
@@ -583,10 +631,11 @@ def main(port: int, transport: str) -> int:
         max_label_length = arguments.get("max_label_length", 20)
         title = arguments.get("title")
         
-        if session_id not in sessions:
+        session_error = _validate_session_exists(session_id)
+        if session_error:
             return [types.TextContent(
                 type="text",
-                text=f"Error: Session {session_id} not found"
+                text=session_error
             )]
         
         session = sessions[session_id]
